@@ -1,0 +1,397 @@
+---
+title: "Final Project"
+author: "Caijun Qin"
+date: '2022-04-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Survival analysis packages.
+
+```{r}
+packages.survival <- c("survival", "survminer", "SurvMetrics")
+install.packages(packages.survival)
+lapply(X = packages.survival, FUN = library, character.only = TRUE)
+```
+
+Load data.
+
+```{r}
+kickstarter.data <- read.csv(file = "./data/kickstarter_1.csv", header = TRUE)
+kickstarter.data <- kickstarter.data  %>% 
+  dplyr::mutate_if(.predicate = is.integer, .funs = as.factor) %>% 
+  mutate(day_succ = as.integer(x = day_succ), Status = as.integer(x = Status))
+
+kickstarter.data
+```
+
+Descriptive statistics of dataset.
+
+```{r}
+ncol(x = kickstarter.data)
+nrow(x = kickstarter.data)
+summary(object = kickstarter.data)
+unique(kickstarter.data$day_succ)/
+```
+
+Kaplan-Meier as Control.
+
+```{r}
+fit <- survival::survfit(formula = survival::Surv(time = day_succ, event = Status) ~ 1, data = kickstarter.data)
+fit
+plot(x = fit, main = "Kaplan-Meier Plot", xlab = "Days", ylab = "Count of Ongoing Projects")
+```
+
+Summary of KM model.
+
+```{r}
+# summary of survival curves
+fit.summary <- summary(object = fit)
+
+# sort summary table
+fit.summary$table
+```
+
+Re-organizing KM model summary as dataframe.
+
+```{r}
+fit.df <- data.frame(
+  time = fit$time,
+  n.risk = fit$n.risk,
+  n.event = fit$n.event,
+  n.censor = fit$n.censor,
+  surv = fit$surv,
+  upper = fit$upper,
+  lower = fit$lower
+)
+fit.df
+```
+
+KM plot considering only time.
+
+```{r}
+survminer::ggsurvplot(
+          fit = fit,
+          pval = TRUE, 
+          conf.int = TRUE,
+          conf.int.style = "step",
+          risk.table = "abs_pct", # Add risk table
+          risk.table.col = "strata", # Change risk table color by groups
+          risk.table.y.text.col = TRUE,# colour risk table text annotations.
+          risk.table.y.text = FALSE,
+          linetype = "strata", # Change line type by groups
+          surv.median.line = "hv", # Specify median survival
+          
+          main = "Kaplan-Meier Plot",
+          xlab = "Time (Days)",
+          ylab = "Survival Probability",
+          
+          ggtheme = ggplot2::theme_bw(), # Change ggplot2 theme
+          palette = c("#E7B800", "#2E9FDF")
+)
+```
+
+Kaplan-Meier fitted against all factors (for dataset description).
+
+```{r}
+kickstarter.factor.names <- colnames(x = kickstarter.data %>% dplyr::select_if(.predicate = is.factor))
+formula.all <- eval(parse(text = paste0("survival::Surv(time = day_succ, event = Status) ~", paste0(kickstarter.factor.names, collapse = ' + '))))
+fit.all <- survival::survfit(formula = formula.all, data = kickstarter.data)
+saveRDS(object = fit.all, file = "fit.all.rds")
+fit.all
+plot(x = fit.all, main = "Kaplan-Meier Plot", xlab = "Days", ylab = "Count of Ongoing Projects")
+```
+
+KM plot considering only time.
+
+```{r}
+fit.reduced <- survival::survfit(formula = survival::Surv(time = day_succ, event = Status) ~ facebook_connected + has_video, data = kickstarter.data)
+saveRDS(object = fit.named, file = "fit.named.rds")
+survminer::ggsurvplot(
+          fit = fit.reduced,
+          pval = TRUE,
+          conf.int = TRUE,
+          # conf.int.style = "step",
+          risk.table = "abs_pct", # Add risk table
+          risk.table.col = "strata", # Change risk table color by groups
+          risk.table.y.text.col = TRUE,# colour risk table text annotations.
+          risk.table.y.text = FALSE,
+          linetype = "strata", # Change line type by groups
+          surv.median.line = "hv", # Specify median survival
+
+          main = "Kaplan-Meier Plot",
+          xlab = "Time (Days)",
+          ylab = "Survival Probability",
+          
+          ggtheme = ggplot2::theme_bw(), # Change ggplot2 theme
+          legend.labs = rev(x = c("Neither", "Video", "FB", "FB + Video")),
+          palette = c("red", "orange", "green", "purple")
+)
+```
+
+Machine Learning in Survival Analysis.
+
+```{r}
+packages.mlr3 <- c("mlr3proba", "mlr3learners")
+install.packages(packages.mlr3)
+lapply(X = packages.mlr3, FUN = library, character.only = TRUE)
+```
+
+```{r}
+runModel <- function (learner, task, measures, train_set, test_set, verbose = FALSE) {
+  # train
+  if(verbose)
+    print("1. train")
+
+  # checking lengths of train and test sets
+  if(verbose) {
+    cat("train_set size: ", length(x = train_set))
+    cat("test_set size: ", length(x = test_set))
+  }
+  
+  learner$train(task = task, row_ids = train_set)
+  learner$model
+
+  # predict
+  if(verbose)
+    print("2. predict")
+  
+  prediction <- learner$predict(task, row_ids = test_set)
+  prediction$data$distr
+  
+  # evaluate
+  if(verbose)
+    print("3. evaluate")
+  
+  scores <- prediction$score(measures = measures)
+  
+  list(
+    train_set = train_set,
+    test_set = test_set,
+    prediction = prediction,
+    scores = scores
+  )
+}
+```
+
+Default variables for ML models.
+
+```{r}
+kickstarter.data.reduced <- dplyr::bind_cols(kickstarter.data %>% dplyr::select(c(1:2)), kickstarter.data %>% dplyr::select(facebook_connected, has_video))
+kickstarter.data.reduced
+
+# create task
+task.kickstarter <- mlr3proba::TaskSurv$new(
+  id = "kickstarter", 
+  backend = kickstarter.data.reduced, 
+  time = "day_succ", 
+  event = "Status", 
+  type = "right"
+)
+
+# select metrics for measuring performance
+measures <- lapply(c("surv.cindex", "surv.graf"), mlr3::msr)
+
+# train test split
+train_set <- sample(x = task.kickstarter$nrow, size = 0.8 * task.kickstarter$nrow)
+test_set <- setdiff(x = seq_len(length.out = task.kickstarter$nrow), y = train_set)
+```
+
+Conventional models.
+
+Kaplan-Meier
+
+```{r}
+learner.surv.kaplan <- mlr3proba::LearnerSurvKaplan$new()
+learner.surv.kaplan.results <- runModel(
+  learner = learner.surv.kaplan,
+  task = task.kickstarter,
+  measures = measures,
+  train_set = train_set,
+  test_set = test_set
+)
+learner.surv.kaplan.results
+```
+
+Cox PH
+
+```{r}
+learner.surv.coxph <- mlr3proba::LearnerSurvCoxPH$new()
+
+kickstarter.data.custom <- dplyr::bind_cols(
+  kickstarter.data[, c(1:2)], 
+  
+  kickstarter.data.reduced %>% 
+  dplyr::select_if(.predicate = function(x) {
+  if(is.factor(x = x))
+    if(length(x = levels(x = x)) >= 2)
+      TRUE
+    else
+      FALSE
+  else
+    FALSE
+  })
+)
+
+task.kickstarter.custom <- mlr3proba::TaskSurv$new(
+  id = "custom",
+  backend = kickstarter.data.custom,
+  time = "day_succ",
+  event = "Status",
+  type = "right"
+)  
+
+learner.surv.coxph.results <- runModel(
+  learner = learner.surv.coxph, 
+  task = task.kickstarter.custom, 
+  measures = measures, 
+  train_set = train_set, 
+  test_set = test_set
+)
+
+learner.surv.coxph.results
+```
+
+Installing more dependencies for mlr3 models.
+
+```{r}
+remotes::install_github("mlr-org/mlr3extralearners")
+library(mlr3extralearners)
+
+packages.mlr3.dependencies <- c("survivalmodels", "partykit", "coin", "randomForestSRC", "pracma", "xgboost", "survivalsvm")
+install.packages(packages.mlr3.dependencies)
+lapply(X = packages.mlr3.dependencies, FUN = library, character.only = TRUE)
+```
+
+Installing dependencies to run Python.
+
+```{r}
+install.packages("reticulate")
+library(reticulate)
+reticulate::use_python(python = "D:/Program Files/Python39/python.exe")
+```
+
+ML models.
+
+Regression tree.
+
+```{r}
+learner.surv.rpart <- mlr3proba::LearnerSurvRpart$new()
+learner.surv.rpart.results <- runModel(
+  learner = learner.surv.rpart,
+  task = task.kickstarter,
+  measures = measures,
+  train_set = train_set,
+  test_set = test_set
+)
+learner.surv.rpart.results
+```
+
+Conditional inference tree.
+
+```{r}
+learner.surv.ctree <- mlr3extralearners::LearnerSurvCTree$new()
+learner.surv.ctree.results <- runModel(
+  learner = learner.surv.ctree,
+  task = task.kickstarter,
+  train_set = train_set,
+  test_set = test_set
+)
+learner.surv.ctree.results
+```
+
+XGBoost.
+
+```{r}
+learner.surv.xgboost <- mlr3learners::LearnerSurvXgboost$new()
+
+kickstarter.data.custom <- kickstarter.data.reduced %>% dplyr::mutate_if(.predicate = is.factor, .funs = as.integer)
+
+task.kickstarter.custom <- mlr3proba::TaskSurv$new(
+  id = "custom",
+  backend = kickstarter.data.custom,
+  time = "day_succ",
+  event = "Status",
+  type = "right"
+)  
+
+learner.surv.xgboost.results <- runModel(
+  learner = learner.surv.ctree,
+  task = task.kickstarter.custom,
+  measures = measures,
+  train_set = train_set,
+  test_set = test_set
+)
+
+learner.surv.xgboost.results
+```
+
+Akritas KNN.
+
+```{r}
+learner.surv.akritas <- mlr3extralearners::LearnerSurvAkritas$new()
+
+kickstarter.data.custom <- dplyr::bind_cols(
+  kickstarter.data[, c(1:2)], 
+  
+  kickstarter.data.reduced %>% 
+  dplyr::select_if(.predicate = function(x) {
+  if(is.factor(x = x))
+    if(length(x = levels(x = x)) >= 2)
+      TRUE
+    else
+      FALSE
+  else
+    FALSE
+  })
+)
+
+task.kickstarter.custom <- mlr3proba::TaskSurv$new(
+  id = "custom",
+  backend = kickstarter.data.custom,
+  time = "day_succ",
+  event = "Status",
+  type = "right"
+)
+
+learner.surv.akritas.results <- runModel(
+  learner = learner.surv.akritas, 
+  task = task.kickstarter.custom, 
+  measures = measures, 
+  train_set = train_set, 
+  test_set = test_set
+)
+
+learner.surv.akritas.results
+```
+
+Survival random forest
+
+```{python}
+
+```
+
+SVM.
+
+```{r}
+install.packages("quadprog")
+library(quadprog)
+```
+
+```{r}
+learner.surv.svm <- mlr3extralearners::LearnerSurvSVM$new()
+learner.surv.svm$param_set$values = mlr3misc::insert_named(x = learner.surv.svm$param_set$values, y = list(gamma.mu = 1.0))
+learner.surv.svm.results <- runModel(
+  learner = learner.surv.svm, 
+  task = task.kickstarter, 
+  measures = measures, 
+  train_set = train_set[1:100], 
+  test_set = test_set,
+  verbose = T
+)
+
+learner.surv.svm.results
+```
